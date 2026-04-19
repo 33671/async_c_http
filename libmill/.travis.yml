@@ -1,0 +1,52 @@
+language: c
+
+sudo: false
+
+os:
+  - osx
+  - linux
+
+compiler:
+  - gcc
+  - clang
+
+env:
+  matrix:
+   - CONF="autotools-shared"
+   - CONF="autotools-static"
+   - CONF="autotools-shared-poll"
+   - CONF="cmake-shared"
+
+addons:
+  apt:
+    sources:
+      - ubuntu-toolchain-r-test
+    packages:
+      - gcc-4.8
+      - clang
+
+branches:
+  only:
+    - master
+
+before_install:
+  - 'if [[ "$TRAVIS_OS_NAME" == "osx" ]]; then export CFLAGS="-I/usr/local/opt/openssl/include $CFLAGS" LDFLAGS="-L/usr/local/opt/openssl/lib $LDFLAGS"; fi'
+
+install:
+  - if [[ $CONF == "autotools-shared" ]]; then ./autogen.sh && ./configure --enable-ssl  && make; fi
+  - if [[ $CONF == "autotools-static" ]]; then ./autogen.sh && ./configure --enable-ssl --disable-shared && make; fi
+  - if [[ $CONF == "autotools-shared-poll" ]]; then ./autogen.sh && ./configure --enable-ssl CFLAGS="-DMILL_POLL $CFLAGS" && make; fi
+  - if [[ $CONF == "cmake-shared"  ]]; then cmake . && make; fi
+
+script:
+  - if [[ $CONF == "autotools-shared" ]]; then make check; fi
+  - if [[ $CONF == "autotools-static" ]]; then make check; fi
+  - if [[ $CONF == "autotools-shared-poll" ]]; then make check; fi
+  - if [[ $CONF == "cmake-shared"  ]]; then make test; fi
+
+after_failure:
+  - for f in tests/*.log; do echo; echo "${f}:"; cat $f; done;
+  - cat test-suite.log
+
+notifications:
+  email: false
