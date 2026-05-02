@@ -10,57 +10,14 @@
 #include <string.h>
 #include <signal.h>
 #include <curl/curl.h>
-
+#include "utils.h"
 #include "openai_stream_client.h"
 #include "libmill/libmill.h"
 #include "llm_parser.h"
 static volatile int g_running = 1;
 static volatile int g_streaming = 0;  /* Set to 1 when actively streaming */
 
-/* Load .env file into environment variables */
-static void load_env_file(const char *path) {
-    FILE *fp = fopen(path, "r");
-    if (!fp) {
-        return;  /* Silently skip if file doesn't exist */
-    }
-    
-    printf("Loading environment from: %s\n", path);
-    char line[1024];
-    while (fgets(line, sizeof(line), fp)) {
-        /* Remove trailing newline/carriage return */
-        size_t len = strlen(line);
-        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
-            line[--len] = '\0';
-        }
-        
-        /* Skip empty lines and comments */
-        if (len == 0 || line[0] == '#') continue;
-        
-        /* Find the '=' separator */
-        char *eq = strchr(line, '=');
-        if (!eq) continue;
-        
-        *eq = '\0';
-        char *key = line;
-        char *value = eq + 1;
-        
-        /* Trim whitespace from key */
-        while (*key == ' ' || *key == '\t') key++;
-        char *kend = key + strlen(key) - 1;
-        while (kend > key && (*kend == ' ' || *kend == '\t')) *kend-- = '\0';
-        
-        /* Trim whitespace from value (optional) */
-        while (*value == ' ' || *value == '\t') value++;
-        
-        /* Skip if key is empty */
-        if (strlen(key) == 0) continue;
-        
-        /* Set environment variable, overwriting any existing value */
-        setenv(key, value, 1);
-    }
-    
-    fclose(fp);
-}
+
 
 void sigint_handler(int sig) {
     if (g_streaming) {
@@ -94,11 +51,6 @@ coroutine void chunk_processor(stream_client_t *client) {
         if (!first_token && (chunk.content || chunk.reasoning_content)) {
             first_token = 1;
         }
-        // if (chunk.role != -1) == 0)
-        // {
-        //     printf("Assitent: \n");
-        //     fflush(stdout);
-        // }
         /* Print content as it arrives */
         if (chunk.content) {
             printf("%s", chunk.content);

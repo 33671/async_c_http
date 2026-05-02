@@ -1,0 +1,1 @@
+void load_env_file(const char *path);

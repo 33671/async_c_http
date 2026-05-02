@@ -113,7 +113,7 @@ target_include_directories(openai_stream_client_lib PUBLIC
 )
 
 # Stream client example with async API
-add_executable(openai_stream_client_async openai_stream_client_async_test.c)
+add_executable(openai_stream_client_async openai_stream_client_async_test.c utils.c)
 # Disable stack protection flags that conflict with libmill's stack switching
 target_compile_options(openai_stream_client_async PRIVATE
     #-fno-stack-protector -fno-stack-clash-protection -fcf-protection=none
