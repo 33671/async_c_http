@@ -284,6 +284,7 @@ coroutine int llm_runtime_send(llm_runtime_t *rt,
         LlmParserStatus st = llm_parser_add_message(rt->parser, msg);
         cJSON_Delete(msg);
         if (st < 0) {
+            printf("\nllm_parser_add_message error:%s\n",llm_parser_get_error(rt->parser));
             set_error(rt, "llm_parser_add_message failed");
             return -1;
         }

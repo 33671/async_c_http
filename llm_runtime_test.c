@@ -2,12 +2,13 @@
  * llm_runtime_test.c
  *
  * Test program demonstrating the high-level LLM runtime.
- * Uses libmill coroutines for async streaming.
+ * Uses isocline for rich terminal input (multiline, history, bbcode colors).
  *
  * Features:
  *   - Multi-turn conversation (history maintained automatically)
  *   - Tool registration and automatic execution loop
  *   - Streaming callbacks for content/reasoning/tool_calls
+ *   - Multiline input: Enter submits, Shift+Enter / Ctrl+J inserts newline
  *   - Colored terminal output
  */
 
@@ -17,11 +18,10 @@
 #include <unistd.h>
 #include <signal.h>
 #include <curl/curl.h>
-#include "cjson/cJSON.h"
 #include "utils.h"
 #include "llm_runtime.h"
 #include "libmill/libmill.h"
-#include "linenoise/linenoise.h"
+#include "isocline/include/isocline.h"
 
 /* ============================================================================
  * Global State
@@ -33,11 +33,10 @@ void sigint_handler(int sig) {
     if (g_rt && !llm_runtime_is_cancelled(g_rt)) {
         /* First Ctrl+C: cancel the current streaming turn */
         llm_runtime_cancel(g_rt);
-        printf("\n[Cancelling...]\n");
+        write(STDOUT_FILENO, "\n[Cancelling...]\n", 17);
     } else {
         /* Second Ctrl+C: exit */
-        printf("\n[Exiting...]\n");
-        linenoiseHistorySave("history.txt");
+        write(STDOUT_FILENO, "\n[Exiting...]\n", 14);
         _exit(0);
     }
 }
@@ -57,7 +56,7 @@ static cJSON *tool_sleep(llm_runtime_t *rt, const cJSON *args) {
     double slept = 0;
     while (slept < secs) {
         if (llm_runtime_is_cancelled(rt)) {
-            printf("\n  [tool] cancelled!\n");
+            printf("  [tool] cancelled!\n");
             cJSON *result = cJSON_CreateObject();
             cJSON_AddStringToObject(result, "status", "cancelled");
             cJSON_AddNumberToObject(result, "slept_for", slept);
@@ -86,7 +85,7 @@ static void on_runtime_event(llm_runtime_t *rt,
 
     switch (event) {
     case LLM_RT_EVENT_REASONING:
-        /* Dim/italic for reasoning */
+        /* Dim for reasoning */
         printf("\033[2;3m%s\033[0m", text);
         fflush(stdout);
         break;
@@ -143,54 +142,57 @@ static void on_runtime_event(llm_runtime_t *rt,
 }
 
 /* ============================================================================
- * Main Coroutine: Interactive REPL
+ * Main Coroutine: Interactive REPL (isocline multiline input)
  * ============================================================================ */
 coroutine void chat_loop(llm_runtime_t *rt) {
-    char input[4096];
-
     while (1) {
-        /* Let other coroutines run before blocking on stdin */
+        /* Let other coroutines run before blocking on input */
         yield();
 
-        /* linenoise() is blocking like fgets(), but provides line editing,
-         * history (up/down arrows), and Ctrl+C handling.
-         * On Ctrl+C or EOF, it returns NULL. */
-        char *line = linenoise("You: ");
+        /*
+         * Read input with isocline.
+         *
+         * Multiline mode is enabled: Enter submits, Shift+Enter / Ctrl+J
+         * inserts a literal newline.
+         *
+         * The prompt uses BBCode markup for color (isocline's native format):
+         *   $bold$green  You: $reset$  -> bold green "You: "
+         * isocline handles BBCode correctly in prompt width calculations.
+         */
+        char *line = ic_readline("[green][b]User[/] ");
         if (!line) {
-            /* EOF (Ctrl+D) or signal — exit */
+            /* EOF (Ctrl+D) or Ctrl+C (in empty line) */
             break;
         }
 
-        /* Copy to local buffer and free linenoise's allocation */
-        strncpy(input, line, sizeof(input) - 1);
-        input[sizeof(input) - 1] = '\0';
-
-        /* Don't add empty lines to history */
-        if (input[0] != '\0') {
-            linenoiseHistoryAdd(line);
+        /* Trim trailing newlines that isocline might leave */
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+            line[--len] = '\0';
         }
-        linenoiseFree(line);
 
-        if (strcmp(input, "quit") == 0 || strcmp(input, "exit") == 0) {
+        if (len == 0) {
+            free(line);
+            continue;
+        }
+
+        if (strcmp(line, "quit") == 0 || strcmp(line, "exit") == 0) {
+            free(line);
             printf("Goodbye!\n");
             break;
         }
-        if (strcmp(input, "reset") == 0) {
+        if (strcmp(line, "reset") == 0) {
             llm_runtime_reset(rt);
             printf("Conversation reset.\n");
+            free(line);
             continue;
         }
-        if (strlen(input) == 0) continue;
 
-        /* Send message and stream the response.
-         * The runtime handles:
-         *   - building the request from history
-         *   - feeding chunks to the parser
-         *   - automatically executing tools and looping */
-        printf("\033[1;34mAssistant:\033[0m ");
+        /* Send message and stream the response */
+        // ic_print("[green][b]Assistant:[/] ");
         fflush(stdout);
 
-        int ret = llm_runtime_send(rt, input, on_runtime_event, NULL);
+        int ret = llm_runtime_send(rt, line, on_runtime_event, NULL);
         if (ret != 0) {
             if (llm_runtime_is_cancelled(rt)) {
                 printf("\n[Cancelled]\n");
@@ -200,12 +202,13 @@ coroutine void chat_loop(llm_runtime_t *rt) {
             }
         }
 
+        free(line);
+
         /* Brief pause so the user can read output before next prompt */
         msleep(now() + 100);
     }
 
     printf("\nGoodbye!\n");
-    linenoiseHistorySave("history.txt");
     _exit(0);
 }
 
@@ -255,18 +258,19 @@ int main(int argc, char *argv[]) {
 
     curl_global_init(CURL_GLOBAL_DEFAULT);
 
+    /* Configure isocline */
+    ic_enable_multiline(true);         /* Enter=submit, Shift+Enter=newline */
+    ic_set_history(".history", 100);   /* persistent history */
+
     printf("╔════════════════════════════════════════════════════════╗\n");
-    printf("║   LLM Runtime Demo                                    ║\n");
+    printf("║   LLM Runtime Demo (isocline)                         ║\n");
     printf("╠════════════════════════════════════════════════════════╣\n");
     printf("║ Model:    %-46s ║\n", model);
     printf("║ Endpoint: %-44s ║\n", api_endpoint);
     printf("║ Log:      %-44s ║\n", log_file);
+    printf("║ Input:    Enter=submit, Shift+Enter/Ctrl+J=newline    ║\n");
     printf("║ Commands: quit, reset                                 ║\n");
     printf("╚════════════════════════════════════════════════════════╝\n\n");
-
-    /* Initialize linenoise with history */
-    linenoiseHistorySetMaxLen(100);
-    linenoiseHistoryLoad("history.txt");
 
     /* Create runtime */
     llm_runtime_t *rt = llm_runtime_new(api_key, model, api_endpoint, log_file);
@@ -276,10 +280,9 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Register tools */
+    /* Register tools and schemas */
     llm_runtime_register_tool(rt, "sleep", tool_sleep);
 
-    /* Set tool schema so the LLM knows the tool exists and its signature */
     cJSON *sleep_schema = cJSON_CreateObject();
     cJSON_AddStringToObject(sleep_schema, "type", "function");
     cJSON *func = cJSON_AddObjectToObject(sleep_schema, "function");
@@ -305,9 +308,7 @@ int main(int argc, char *argv[]) {
     /* Launch the REPL coroutine */
     go(chat_loop(rt));
 
-    /* Keep the libmill scheduler alive forever.
-     * The chat_loop coroutine calls _exit(0) when the user types "quit".
-     * SIGINT calls llm_runtime_cancel() on first press, _exit(0) on second. */
+    /* Keep the libmill scheduler alive forever */
     while (1) {
         msleep(now() + 100);
     }

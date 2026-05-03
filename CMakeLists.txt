@@ -147,15 +147,22 @@ target_link_libraries(openai_stream_client_async
     Threads::Threads
 )
 
-# LLM Runtime test program
-add_executable(llm_runtime_test llm_runtime_test.c utils.c linenoise/linenoise.c)
-target_include_directories(llm_runtime_test PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/linenoise
+# isocline library (amalgamation build)
+add_library(isocline STATIC isocline/src/isocline.c)
+target_include_directories(isocline PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/isocline/include
 )
+target_compile_options(isocline PRIVATE
+    -Wall -Wextra -Wno-unused-function -Wno-unused-parameter
+)
+
+# LLM Runtime test program
+add_executable(llm_runtime_test llm_runtime_test.c utils.c)
 target_compile_options(llm_runtime_test PRIVATE
     -fno-stack-clash-protection
 )
 target_link_libraries(llm_runtime_test
+    isocline
     llm_runtime
     openai_stream_client_lib
     openai_sse_parser

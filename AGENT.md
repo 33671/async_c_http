@@ -34,7 +34,6 @@ An **async HTTP SSE (Server-Sent Events) client in C** for streaming OpenAI-comp
 - **libcurl** runs in dedicated thread(s) for blocking HTTP I/O
 - **pipe** transfers data from curl thread to libmill coroutine
 - **fdwait()** enables async waiting on pipe in libmill's event loop
-- Multiple concurrent SSE connections supported
 
 ---
 
@@ -42,164 +41,100 @@ An **async HTTP SSE (Server-Sent Events) client in C** for streaming OpenAI-comp
 
 | Component | Files | Status | Description |
 |---|---|---|---|
-| **SSE Parser** | `openai_sse_parser.h/.c` | ✅ Stable | SSE event extraction, JSON validation, chunk parsing (content, reasoning_content, tool_calls, usage) |
-| **Tool Call Parser** | `tool_call_parser.h/.c` | ✅ Stable | Accumulates streaming tool_call delta fragments into complete JSON arrays |
-| **Stream Client** | `openai_stream_client.h/.c` | ⚠️ Mostly stable | Async streaming client using libmill + libcurl + pipe. Lifecycle, piped data transfer, coroutine-based chunk iteration |
-| **LLM Parser** | `llm_parser.h/.c` | ✅ Stable | State machine managing multi-turn conversation history (messages array), accumulates assistant responses |
-| **LLM Runtime** | `llm_runtime.h/.c` | ❌ Empty (0 bytes) | **Next major component** - should tie together parser, client, and tool execution |
-| **Test Program** | `openai_stream_client_async_test.c` | ⚠️ Working | Interactive REPL, sends prompts, displays streaming responses via libmill coroutines |
-| **Utils** | `utils.c/.h` | ✅ Done | Simple .env file loader |
-| **Build System** | `CMakeLists.txt` | ✅ Working | Builds static libs + executables |
+| **SSE Parser** | `openai_sse_parser.h/.c` | ✅ Stable | SSE event extraction, JSON validation, chunk parsing (content, reasoning, tool_calls, usage) |
+| **Tool Call Parser** | `tool_call_parser.h/.c` | ✅ Stable | Streaming tool_call delta fragment accumulation |
+| **Stream Client** | `openai_stream_client.h/.c` | ✅ Stable | Async streaming client (libmill + libcurl + pipe). Dynamic request body builder with tool schema support |
+| **LLM Parser** | `llm_parser.h/.c` | ✅ Stable | Multi-turn conversation state machine. `force_finish()` for cancellation cleanup |
+| **LLM Runtime** | `llm_runtime.h/.c` | ✅ Stable | High-level orchestration: wraps stream_client + llm_parser + tool execution + cancellation |
+| **Runtime Test** | `llm_runtime_test.c` | ✅ Stable | Interactive REPL with isocline multiline input, tool demo, streaming callbacks |
+| **Old Test** | `openai_stream_client_async_test.c` | ⚠️ Legacy | Still works but deprecated |
+| **Utils** | `utils.c/.h` | ✅ Done | .env file loader |
 | **Test Server** | `test_server.py` | ✅ Done | Python aiohttp SSE test server |
+| **isocline** | `isocline/` | ✅ Integrated | Terminal input: multiline, history, BBCode colors |
+| **hl-vt100** | `hl-vt100/` | ❌ Not used | Available for future rich terminal rendering |
 
 ---
 
 ## Detailed Breakdown
 
 ### 1. SSE Parser (`openai_sse_parser.h/.c`)
-- `stream_buffer_t` - Ring-buffer for accumulating raw SSE data
-- `StreamChunk` - Parsed struct with: `content`, `reasoning_content`, `tool_calls`, `role`, `finish_reason`, `usage` data
-- `extract_next_chunk()` - Main parsing entry point, extracts next complete chunk from buffer
-- Handles `data: [DONE]` marker, multi-line JSON, SSE event boundaries
+- `stream_buffer_t` — Ring-buffer for accumulating raw SSE data
+- `StreamChunk` — Parsed struct: `content`, `reasoning_content`, `tool_calls`, `role`, `finish_reason`, `usage`
+- `extract_next_chunk()` — Main parsing entry point
 
 ### 2. Tool Call Parser (`tool_call_parser.h/.c`)
-- `ToolCallDeltaParser` - Manages up to `MAX_TOOL_CALLS` (256) parallel tool call slots
-- `feed_toolcall_delta()` - Feed chunks with incremental `tool_calls` array, accumulates fragments by `index`
-- Produces complete `cJSON` array of tool calls on stream end
-- Handles interleaved id/name/arguments across chunks
+- `ToolCallDeltaParser` — Up to 256 parallel tool call slots by index
+- `feed_toolcall_delta()` — Accumulates incremental fragments across chunks
+- Produces complete `cJSON` array on stream end
 
 ### 3. Stream Client (`openai_stream_client.h/.c`)
-- `stream_client_new/free()` - Lifecycle management
-- `stream_client_start_chat()` - Launches curl thread with pipe setup.
-  Accepts `cJSON *messages` (array of message objects). Builds full request
-  body internally via `build_request_body()` helper using client config
-  (model, temperature, system_message).
-- `build_request_body()` — Static helper that constructs the complete JSON
-  request body using cJSON functions (safe escaping, no raw string formatting).
-  Automatically prepends system message if configured and not already present,
-  and includes tool schemas (`tools` + `tool_choice: "auto"`) if set.
-- `stream_client_set_tool_schemas()` — Set tool definition JSON array on the
-  client. The schemas are deep-copied and included in every subsequent request
-  body.
-- `next_chunk()` / `next_chunk_nowait()` - Coroutine-based async chunk iteration
-- `stream_client_cancel()` - Sets `running=0`, curl checks via xfer callback
-- `stream_client_chat_blocking()` — Builds cJSON messages array internally
-  from the prompt string, then delegates to `start_chat()`.
+- `stream_client_new/free()` — Lifecycle
+- `stream_client_start_chat(client, messages)` — Accepts cJSON messages array, builds full request body internally
+- `build_request_body()` — Static helper using cJSON API. Includes: model, messages, temperature, stream=true, tool schemas (if set)
+- `stream_client_set_tool_schemas()` — Set tool definition JSON array (deep-copied, included in every subsequent request)
+- `next_chunk()` / `next_chunk_nowait()` — Coroutine-based async chunk iteration
+- `stream_client_cancel()` — Sets running=0, curl checks via xfer callback
 
 ### 4. LLM Parser (`llm_parser.h/.c`)
 - State machine: `IDLE → IN_ASSISTANT → FINISHED`
-- `llm_parser_feed_chunk()` - Feeds StreamChunks, accumulates content/reasoning/tool_calls
-- `llm_parser_add_message()` - Adds user/system/tool messages to history
-- `llm_parser_get_history()` - Returns full `{"messages": [...]}` JSON
-- Handles finish signals and usage extraction
 - Status reporting: `REASONING`, `RESPONDING`, `WRITING_TOOL_CALL`, `FINISHED`
+- `llm_parser_force_finish()` — On cancellation: finalizes partial content/reasoning, discards incomplete tool calls, keeps history valid
 
 ### 5. LLM Runtime (`llm_runtime.h/.c`)
-- ✅ **Implemented and builds cleanly**
-- High-level orchestration layer wrapping stream_client + llm_parser
-- **Key API**:
-  - `llm_runtime_new()` / `llm_runtime_free()` — lifecycle
-  - `llm_runtime_send()` — **coroutine** that sends user message, streams response via callback, and automatically handles the tool execution loop
-  - `llm_runtime_register_tool()` — register tool handlers by name
-  - `llm_runtime_set_tool_schema()` — set tool definition JSON array (the
-    `tools` field in the API request body). Separate from register_tool:
-    set_tool_schema tells the LLM what tools exist and their signatures;
-    register_tool tells the runtime which C function handles each tool.
-  - `llm_runtime_add_user_message()` — add to history without sending
-  - `llm_runtime_get_history()` — readonly access to full `{"messages":[...]}`
-  - `llm_runtime_reset()` / `llm_runtime_cancel()` — control
-- **Tool loop**: after streaming finishes, checks the last assistant message for `tool_calls`. If found, executes registered tool functions, adds `{role:"tool"}` results to parser history, and automatically sends another streaming request with the updated history. Loops up to `LLM_RUNTIME_MAX_TOOL_LOOPS` (16) times.
-- **Callback events**: `REASONING`, `CONTENT`, `TOOL_CALLS`, `TOOL_RESULT`, `USAGE`, `DONE`, `ERROR`, `STATUS_CHANGE`
-- **Thread safety**: cancellation via `volatile int running` flag; curl thread aborts via xfer callback
+High-level orchestration layer:
+
+| API | Description |
+|---|---|
+| `llm_runtime_new/free()` | Lifecycle |
+| `llm_runtime_send()` | **Coroutine**: sends message, streams via callback, auto tool loop |
+| `llm_runtime_register_tool()` | Register C handler for a tool name |
+| `llm_runtime_set_tool_schema()` | Set tool JSON schema for API request body |
+| `llm_runtime_add_user_message()` | Add to history without sending |
+| `llm_runtime_force_finish()` | Force-close partial assistant message |
+| `llm_runtime_get_history()` | Read-only `{"messages":[...]}` |
+| `llm_runtime_cancel()` | Cancel current turn |
+| `llm_runtime_is_cancelled()` | Check cancellation (for tool functions) |
+
+**Cancellation architecture**:
+- `rt->running` is the single source of truth
+- `llm_runtime_send()` resets `running=1` at start of each turn
+- SIGINT → `llm_runtime_cancel()` → sets `running=0`
+- Cancellation checks at every phase of send():
+  - Before starting a stream → return
+  - Mid-stream → cancel curl, force_finish parser, return
+  - During tool execution → remaining tools get `{"error":"User has cancelled"}` result
+- Tool functions receive `llm_runtime_t *rt` for cooperative cancellation
 
 ### 6. Runtime Test Program (`llm_runtime_test.c`)
-- ✅ **New** interactive REPL using the high-level runtime
-- Registers a `sleep` tool as example
-- Colored terminal output (blue for content, dim for reasoning, green for tool results)
-- Supports commands: `quit`, `reset`
-- Much simpler than the old test — most complexity is inside the runtime now
+- Global `g_rt` for SIGINT handler access
+- **isocline** for input (replaced linenoise):
+  - `ic_enable_multiline(true)` — **Enter submits**, **Shift+Enter / Ctrl+J inserts newline**
+  - Persistent history via `ic_set_history(".history", 100)`
+  - BBCode colored prompt: `[green][b]User[/] `
+- Registered `sleep` tool demo with cancellation-aware stepping
+- SIGINT: 1st press → cancel, 2nd press → exit
 
-### 6. Test Program (`openai_stream_client_async_test.c`)
-- Interactive REPL with colored prompts
-- Uses libmill coroutines: `chunk_processor` + `cancellation_monitor`
-- Supports `Ctrl+C` cancellation during streaming
-- Reads config from `.env` or environment variables
-- **Does not yet use the LLM Parser's history for multi-turn** — each turn starts fresh
+---
 
-### 7. External Dependencies (included but not integrated)
-| Library | Path | Purpose | Integration Status |
+## Dependencies
+
+| Library | Path | Purpose | Status |
 |---|---|---|---|
-| **libmill** | `libmill/` | Coroutines / async I/O | ✅ Fully integrated |
-| **cjson** | `cjson/` | JSON parsing | ✅ Fully integrated |
-| **linenoise** | `linenoise/` | Line editing (history, completion) | ❌ Not yet used in any source |
-| **hl-vt100** | `hl-vt100/` | VT100 terminal rendering | ❌ Not yet used in any source |
+| **libmill** | `libmill/` | Coroutines / async I/O | ✅ Integrated |
+| **cjson** | `cjson/` | JSON parsing | ✅ Integrated |
+| **isocline** | `isocline/` | Terminal input (multiline, history, colors) | ✅ Integrated |
+| **hl-vt100** | `hl-vt100/` | VT100 rendering | ❌ Not yet used |
 
 ---
 
-## What's Working
-
-- [x] SSE stream parsing (OpenAI format with reasoning_content, tool_calls, usage)
-- [x] Streaming tool call delta accumulation
-- [x] Async chunk iteration via libmill coroutines + pipe + fdwait
-- [x] Multi-threaded curl with backpressure (pipe write blocks)
-- [x] Cancellation via xfer callback
-- [x] Conversation message history management (LLM Parser)
-- [x] Interactive REPL test program
-- [x] Build system (CMake) for all components
-- [x] .env file loading for API keys
-
----
-
-## What's WIP / TODO
-
-### Immediate (Phase 1) — ✅ Done
-
-- [x] **Build `llm_runtime.h/.c`** — High-level runtime wrapping stream_client + llm_parser + tool_call_parser. Supports multi-turn conversation, automatic tool execution loop, streaming callbacks.
-
-- [x] **Refactor `stream_client_start_chat()`** — Now properly builds request body from client config + cJSON messages array using `build_request_body()` helper.
-
-### Medium-term (Phase 2)
-
-- [ ] **Integrate linenoise** — Replace `fgets()` in test programs with linenoise for:
-  - Line editing and history
-  - Prompt display
-  - Multi-line input support
-
-- [ ] **Multi-turn conversation in runtime test** — Runtime already supports this; the test program could be enhanced to show history inspection/management
-
-### Medium-term (Phase 2)
-
-- [ ] **Multi-turn conversation in test program** — Feed assistant responses back into LLM Parser history and allow follow-up questions with full context
-
-- [ ] **Tool execution loop** — In runtime, detect tool calls from LLM, dispatch to registered tool handlers, feed results back, continue the conversation loop
-
-- [ ] **Integrate hl-vt100** — For rich terminal output:
-  - Syntax-highlighted streaming output (markdown/code blocks)
-  - Progress indicators
-  - Structured display for reasoning vs. content
-
-### Future / Nice-to-have
-
-- [ ] **Multiple concurrent streams** — Test and document multiple simultaneous SSE connections
-- [ ] **Connection pooling / reuse** — Keep-alive support in curl
-- [ ] **Error recovery** — Automatic retry on transient errors
-- [ ] **Streaming abort improvements** — More graceful cancellation with proper cleanup
-- [ ] **Automated tests** — Unit tests for parser, integration tests with mock server
-- [ ] **libmill epoll/kqueue auto-detection** — Enable proper poller selection in CMake
-
----
-
-## Build Instructions
+## Build
 
 ```bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+cd build && cmake .. && make -j$(nproc)
 ```
 
-## Environment
+## Environment (`.env`)
 
-Copy `.env.example` or set:
 ```env
 OPENAI_API_KEY=sk-xxx
 OPENAI_BASE_URL=https://api.deepseek.com/v1

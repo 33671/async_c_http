@@ -171,7 +171,7 @@ LlmParserStatus llm_parser_add_message(LlmParser *p, const cJSON *msg_obj)
         set_error(p, "message missing valid 'role'");
         return LLM_PARSER_ERR_ARG;
     }
-    // TODO: CHECK last messgae for validation
+    // TODO: CHECK if message is valid in history
     if (strcmp(role->valuestring, "assistant") == 0) {
         
     }
