@@ -206,6 +206,54 @@ const char *llm_runtime_get_error(const llm_runtime_t *rt);
 /* Get current state as a string (from underlying stream client). */
 const char *llm_runtime_get_state_string(const llm_runtime_t *rt);
 
+/* ============================================================================
+ * Async Subprocess (for non-blocking CLI tool execution)
+ * ============================================================================ */
+
+/*
+ * Run a shell command asynchronously — coroutine-friendly.
+ *
+ * Forks a child process via mfork(), runs `cmd` via /bin/sh -c,
+ * captures merged stdout+stderr into a pipe, and waits via fdwait().
+ *
+ * The coroutine yields until the child finishes, is cancelled, or
+ * the deadline expires. Does NOT block other coroutines.
+ *
+ *   rt       – runtime handle (supports cooperative cancellation)
+ *   cmd      – shell command string (e.g. "ffmpeg -i in.mp4 out.avi")
+ *   deadline – -1 for infinite wait, or now()+milliseconds for timeout
+ *   output   – [out] malloc'd string of merged stdout+stderr (caller frees)
+ *              set to NULL on error
+ *   exit_code – [out] child exit status (meaningful only if return == 0)
+ *
+ * Returns 0 on success, -1 on error / cancelled / timeout.
+ * On cancellation or timeout the child is killed via SIGKILL.
+ *
+ * Must be called from a libmill coroutine.
+ *
+ * Example tool usage:
+ *
+ *   cJSON *my_tool(llm_runtime_t *rt, const cJSON *args) {
+ *       char *out = NULL; int code = 0;
+ *       int ret = llm_runtime_popen(rt, "ls -la /tmp", -1, &out, &code);
+ *       cJSON *r = cJSON_CreateObject();
+ *       if (ret != 0) {
+ *           cJSON_AddStringToObject(r, "error",
+ *               llm_runtime_is_cancelled(rt) ? "cancelled" : "failed");
+ *       } else {
+ *           cJSON_AddNumberToObject(r, "exit_code", code);
+ *           cJSON_AddStringToObject(r, "output", out ? out : "");
+ *       }
+ *       free(out);
+ *       return r;
+ *   }
+ */
+coroutine int llm_runtime_popen(llm_runtime_t *rt,
+                                 const char *cmd,
+                                 int64_t deadline,
+                                 char **output,
+                                 int *exit_code);
+
 #ifdef __cplusplus
 }
 #endif

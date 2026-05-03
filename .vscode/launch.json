@@ -13,7 +13,9 @@
             "cwd": "${workspaceRoot}/build",
             "envFile": "${workspaceRoot}/.env",
             "initCommands": [
-                "process handle SIGINT -p true -s false"
+                "process handle SIGINT -p true -s false",
+                "settings set target.process.follow-fork-mode parent",
+                "settings set target.process.stop-on-exec false"
             ]
         }
     ]

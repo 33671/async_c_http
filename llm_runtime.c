@@ -9,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <signal.h>
+#include <errno.h>
 #include "llm_runtime.h"
 
 /* ============================================================================
@@ -493,4 +498,165 @@ const char *llm_runtime_get_state_string(const llm_runtime_t *rt) {
 
 int llm_runtime_is_cancelled(const llm_runtime_t *rt) {
     return rt ? !rt->running : 1;
+}
+
+/* ============================================================================
+ * Async Subprocess (coroutine-friendly popen)
+ * ============================================================================ */
+
+coroutine int llm_runtime_popen(llm_runtime_t *rt,
+                                 const char *cmd,
+                                 int64_t deadline,
+                                 char **output,
+                                 int *exit_code)
+{
+    if (!rt || !cmd || !output || !exit_code) return -1;
+
+    *output = NULL;
+    *exit_code = -1;
+
+    /* Create pipe for capturing merged stdout+stderr */
+    int pipefd[2];
+    if (pipe(pipefd) != 0) return -1;
+
+    pid_t pid = mfork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* ================================================================
+         * CHILD: redirect stdout+stderr → pipe, exec /bin/sh -c <cmd>
+         * ================================================================ */
+        close(pipefd[0]);                      /* close read end */
+        dup2(pipefd[1], STDOUT_FILENO);        /* stdout → pipe write */
+        dup2(pipefd[1], STDERR_FILENO);        /* stderr → pipe write */
+        close(pipefd[1]);                      /* close original write fd */
+
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+
+        /* If exec fails */
+        _exit(127);
+    }
+
+    /* ================================================================
+     * PARENT: read from pipe via fdwait(), check cancellation, accumulate
+     * ================================================================ */
+    close(pipefd[1]);  /* close write end */
+
+    /* Make read end non-blocking for fdwait */
+    int flags = fcntl(pipefd[0], F_GETFL, 0);
+    fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+
+    size_t   out_cap  = 4096;
+    size_t   out_len  = 0;
+    char    *out_buf  = malloc(out_cap);
+    int      finished = 0;
+
+    if (!out_buf) {
+        kill(pid, SIGKILL);
+        close(pipefd[0]);
+        waitpid(pid, NULL, 0);
+        return -1;
+    }
+    out_buf[0] = '\0';
+
+    while (!finished && !llm_runtime_is_cancelled(rt)) {
+        /* Check deadline */
+        if (deadline >= 0 && now() >= deadline) {
+            break;
+        }
+
+        int64_t wait_deadline = now() + 100;  /* 100ms poll interval */
+        if (deadline >= 0 && wait_deadline > deadline) {
+            wait_deadline = deadline;
+        }
+
+        int ev = fdwait(pipefd[0], FDW_IN, wait_deadline);
+
+        /* Drain data first (FDW_ERR may accompany FDW_IN on EOF) */
+        if (ev & FDW_IN) {
+            char buf[4096];
+            ssize_t n = read(pipefd[0], buf, sizeof(buf));
+            if (n > 0) {
+                /* Grow output buffer if needed */
+                if (out_len + n + 1 > out_cap) {
+                    size_t new_cap = out_cap * 2;
+                    while (new_cap < out_len + n + 1) new_cap *= 2;
+                    char *tmp = realloc(out_buf, new_cap);
+                    if (!tmp) {
+                        kill(pid, SIGKILL);
+                        close(pipefd[0]);
+                        free(out_buf);
+                        waitpid(pid, NULL, 0);
+                        return -1;
+                    }
+                    out_buf = tmp;
+                    out_cap = new_cap;
+                }
+                memcpy(out_buf + out_len, buf, n);
+                out_len += n;
+                out_buf[out_len] = '\0';
+            } else if (n == 0) {
+                /* Pipe closed — child finished */
+                finished = 1;
+            } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                break;
+            }
+        }
+
+        /* FDW_ERR without FDW_IN: child may have exited and closed the pipe.
+         * Try reading one more time — read() returns 0 for EOF. */
+        if ((ev & FDW_ERR) && !(ev & FDW_IN)) {
+            char buf[4096];
+            ssize_t n = read(pipefd[0], buf, sizeof(buf));
+            if (n > 0) {
+                /* Data was available after all — accumulate it */
+                if (out_len + n + 1 > out_cap) {
+                    size_t new_cap = out_cap * 2;
+                    while (new_cap < out_len + n + 1) new_cap *= 2;
+                    char *tmp = realloc(out_buf, new_cap);
+                    if (!tmp) { kill(pid, SIGKILL); close(pipefd[0]); free(out_buf); waitpid(pid, NULL, 0); return -1; }
+                    out_buf = tmp; out_cap = new_cap;
+                }
+                memcpy(out_buf + out_len, buf, n);
+                out_len += n;
+                out_buf[out_len] = '\0';
+            } else if (n == 0) {
+                finished = 1;
+            } else {
+                break;  /* real read error */
+            }
+        }
+    }
+
+    /* If not finished cleanly, kill the child */
+    if (!finished) {
+        kill(pid, SIGKILL);
+    }
+
+    /* Reap the child */
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    /* Clean up pipe */
+    fdclean(pipefd[0]);
+    close(pipefd[0]);
+
+    if (finished) {
+        /* Null-terminate output */
+        if (out_len > 0 && out_buf[out_len - 1] == '\n') {
+            out_buf[--out_len] = '\0';  /* strip trailing newline */
+        }
+        *output    = out_buf;
+        *exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        return 0;
+    }
+
+    /* Cancelled, timed out, or error */
+    free(out_buf);
+    *output = NULL;
+    return -1;
 }

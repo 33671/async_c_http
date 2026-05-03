@@ -73,6 +73,52 @@ static cJSON *tool_sleep(llm_runtime_t *rt, const cJSON *args) {
 }
 
 /* ============================================================================
+ * Example Tool: shell (async CLI runner via llm_runtime_popen)
+ * ============================================================================ */
+static cJSON *tool_shell(llm_runtime_t *rt, const cJSON *args) {
+    cJSON *cmd_json = cJSON_GetObjectItem(args, "cmd");
+    const char *cmd = (cmd_json && cJSON_IsString(cmd_json))
+                      ? cmd_json->valuestring : NULL;
+
+    if (!cmd || !*cmd) {
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddStringToObject(r, "error", "missing 'cmd' argument");
+        return r;
+    }
+
+    printf("\n  [tool] running: %s\n", cmd);
+
+    char *output = NULL;
+    int exit_code = 0;
+
+    /* llm_runtime_popen is coroutine-friendly: uses mfork + fdwait.
+     * It does NOT block other coroutines, and is automatically killed
+     * if the runtime is cancelled. */
+    int ret = llm_runtime_popen(rt, cmd, now() + 30000, &output, &exit_code);
+
+    cJSON *result = cJSON_CreateObject();
+    if (ret != 0) {
+        cJSON_AddStringToObject(result, "error",
+            llm_runtime_is_cancelled(rt) ? "cancelled" : "command failed or timed out");
+    } else {
+        cJSON_AddNumberToObject(result, "exit_code", exit_code);
+        if (output && *output) {
+            /* Truncate very long output */
+            size_t len = strlen(output);
+            if (len > 4000) {
+                output[4000] = '\0';
+                strcat(output, "... [truncated]");
+            }
+            cJSON_AddStringToObject(result, "output", output);
+        } else {
+            cJSON_AddStringToObject(result, "output", "(no output)");
+        }
+    }
+    free(output);
+    return result;
+}
+
+/* ============================================================================
  * Streaming Callback
  * ============================================================================ */
 static void on_runtime_event(llm_runtime_t *rt,
@@ -282,7 +328,9 @@ int main(int argc, char *argv[]) {
 
     /* Register tools and schemas */
     llm_runtime_register_tool(rt, "sleep", tool_sleep);
+    llm_runtime_register_tool(rt, "shell", tool_shell);
 
+    /* sleep tool schema */
     cJSON *sleep_schema = cJSON_CreateObject();
     cJSON_AddStringToObject(sleep_schema, "type", "function");
     cJSON *func = cJSON_AddObjectToObject(sleep_schema, "function");
@@ -297,8 +345,27 @@ int main(int argc, char *argv[]) {
     cJSON *required = cJSON_AddArrayToObject(params, "required");
     cJSON_AddItemToArray(required, cJSON_CreateString("secs"));
 
+    /* shell tool schema */
+    cJSON *shell_schema = cJSON_CreateObject();
+    cJSON_AddStringToObject(shell_schema, "type", "function");
+    cJSON *sh_func = cJSON_AddObjectToObject(shell_schema, "function");
+    cJSON_AddStringToObject(sh_func, "name", "shell");
+    cJSON_AddStringToObject(sh_func, "description",
+        "Run a shell command and return its output (stdout+stderr merged). "
+        "Useful for: ls, cat, grep, find, wc, date, curl, git status, etc. "
+        "Avoid commands that run forever or require interactive input.");
+    cJSON *sh_params = cJSON_AddObjectToObject(sh_func, "parameters");
+    cJSON_AddStringToObject(sh_params, "type", "object");
+    cJSON *sh_props = cJSON_AddObjectToObject(sh_params, "properties");
+    cJSON *sh_cmd = cJSON_AddObjectToObject(sh_props, "cmd");
+    cJSON_AddStringToObject(sh_cmd, "type", "string");
+    cJSON_AddStringToObject(sh_cmd, "description", "The shell command to execute");
+    cJSON *sh_required = cJSON_AddArrayToObject(sh_params, "required");
+    cJSON_AddItemToArray(sh_required, cJSON_CreateString("cmd"));
+
     cJSON *schemas = cJSON_CreateArray();
     cJSON_AddItemToArray(schemas, sleep_schema);
+    cJSON_AddItemToArray(schemas, shell_schema);
     llm_runtime_set_tool_schema(rt, schemas);
     cJSON_Delete(schemas);
 

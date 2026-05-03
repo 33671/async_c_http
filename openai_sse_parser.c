@@ -531,8 +531,20 @@ int extract_next_chunk(stream_buffer_t *buf, StreamChunk *chunk) {
                 free(json_str);
             }
             
-            /* Invalid JSON, consume "data: " and try again */
+            /* Invalid JSON or non-JSON event — consume "data: " prefix.
+             * Check immediately if this reveals a [DONE] marker underneath,
+             * avoiding a wasted fdwait round-trip in extract_chunk_internal. */
             stream_buffer_consume(buf, 6);
+            if (buf->len >= 6 && strncmp(buf->data, "[DONE]", 6) == 0) {
+                chunk->is_done = 1;
+                chunk->is_valid = 1;
+                stream_buffer_consume(buf, 6);
+                /* Also consume following newlines */
+                while (buf->len > 0 && (buf->data[0] == '\n' || buf->data[0] == '\r')) {
+                    stream_buffer_consume(buf, 1);
+                }
+                return 1;
+            }
             return 0;
         }
         

@@ -96,6 +96,7 @@ High-level orchestration layer:
 | `llm_runtime_get_history()` | Read-only `{"messages":[...]}` |
 | `llm_runtime_cancel()` | Cancel current turn |
 | `llm_runtime_is_cancelled()` | Check cancellation (for tool functions) |
+| `llm_runtime_popen()` | **Coroutine**: async popen — forks child, captures stdout+stderr via fdwait, cancellable via SIGKILL |
 
 **Cancellation architecture**:
 - `rt->running` is the single source of truth
@@ -106,6 +107,11 @@ High-level orchestration layer:
   - Mid-stream → kill child process (SIGKILL), force_finish parser, return
   - During tool execution → remaining tools get `{"error":"User has cancelled"}` result
 - Tool functions receive `llm_runtime_t *rt` for cooperative cancellation
+- For blocking CLI commands, use `llm_runtime_popen()` instead of `popen()`/`system()`:
+  - Forks child via `mfork()`, captures stdout+stderr via pipe
+  - Uses `fdwait()` to wait without blocking other coroutines
+  - Supports deadline (timeout)
+  - Automatically killed (SIGKILL) if the runtime is cancelled
 
 ### 6. Runtime Test Program (`llm_runtime_test.c`)
 - Global `g_rt` for SIGINT handler access
@@ -170,9 +176,59 @@ if ((ev & FDW_ERR) && !(ev & FDW_IN)) { break; }  // real error only
 
 ---
 
-### Potential issue: `extract_next_chunk` returns 0 after consuming data
+### Bug 2: `llm_runtime_popen` always returns -1 (FIXED)
 
-When `extract_next_chunk()` encounters `data: [DONE]`, cJSON rejects it as invalid JSON, so the function consumes `"data: "` (6 bytes) and returns `0` — leaving `[DONE]\n\n` in the buffer. The `[DONE]` is then correctly extracted on the **next** call via the `strncmp("[DONE]", 6)` check. This works, but it means one call to `extract_next_chunk` modifies buffer state while claiming "no chunk yet", forcing an extra `fdwait` round-trip. A cleaner approach would be to check for the `[DONE]` string immediately after consuming the `"data: "` prefix, avoiding the false-negative return.
+**Symptom**: Every shell command invoked via `llm_runtime_popen()` returned -1 with `"command failed or timed out"`, even for trivial commands like `echo hello`.
+
+**Root cause**: The same `FDW_ERR`-without-`FDW_IN` pattern as Bug 1, but with a different manifestation. When a short-lived shell command finishes quickly:
+
+1. `fdwait` → `FDW_IN` → `read()` → data (stdout+stderr) ✓
+2. `fdwait` → `FDW_IN` → `read()` → more data ✓
+3. `fdwait` → **`FDW_ERR` only** (no `FDW_IN`) — pipe closed by child exit
+
+The code treated `FDW_ERR`-without-`FDW_IN` as a hard error and `break`-ed immediately. The `finished` flag stayed 0, so the post-loop cleanup called `kill(pid, SIGKILL)` on the already-exited child (harmless but pointless) and returned -1. The last batch of data — or at minimum the pipe EOF — was never observed.
+
+**Debugging**: Wrote a standalone `mfork`+`fdwait` test that traced every `fdwait` return value:
+```
+fdwait returned: 0x1 (IN=1 ERR=0)  → read "hello world\n"
+fdwait returned: 0x1 (IN=1 ERR=0)  → read "stderr test\n"
+fdwait returned: 0x4 (IN=0 ERR=1)  → BROKE without reading EOF
+```
+Confirmed that the kernel delivers the final pipe-close as a pure hangup (`FDW_ERR`) with no readability flag.
+
+**Fix**: After `FDW_ERR`-only, try `read()` one more time before giving up:
+```c
+if ((ev & FDW_ERR) && !(ev & FDW_IN)) {
+    ssize_t n = read(pipefd[0], buf, sizeof(buf));
+    if (n > 0)      { /* accumulate residual data */ }
+    else if (n == 0) { finished = 1; }   // ← EOF caught here
+    else            { break; }           // real error
+}
+```
+The bonus `read()` returns 0 (EOF) when the pipe is fully drained, setting `finished = 1`. Verified with a command containing `sleep 0.1` (slow exit) and a bare `echo` (instant exit) — both now work.
+
+**Lesson**: `FDW_ERR`-only on a pipe read end after drain = child exited. Always try `read()` one more time before concluding error.
+
+---
+
+### Defensive fix: `[DONE]` re-check after consuming `"data: "` prefix (FIXED)
+
+**Context**: `extract_next_chunk()` has a top-level check for `[DONE]` and `data: [DONE]` that catches the common case. However, the multi-line JSON fallback path has a code branch that consumes `"data: "` (6 bytes) when an SSE event contains non-JSON content, then returns 0 — forcing an unnecessary `fdwait` round-trip in `extract_chunk_internal`. This path could theoretically be hit if a non-standard SSE event with a `"data:"` prefix arrives before `[DONE]`.
+
+**Fix**: After consuming the `"data: "` prefix, immediately check if the remaining buffer starts with `[DONE]`. If so, extract it right away without the extra `fdwait` cycle:
+
+```c
+stream_buffer_consume(buf, 6);
+if (buf->len >= 6 && strncmp(buf->data, "[DONE]", 6) == 0) {
+    chunk->is_done = 1;
+    chunk->is_valid = 1;
+    stream_buffer_consume(buf, 6);
+    while (buf->len > 0 && (buf->data[0] == '\n' || buf->data[0] == '\r'))
+        stream_buffer_consume(buf, 1);
+    return 1;
+}
+return 0;
+```
 
 ---
 
@@ -184,23 +240,17 @@ After `mfork()`, `c->total_bytes` in the child process is a separate copy. The c
 
 Both parent and child share the same `c->log_fp` file descriptor (inherited across `mfork`). Concurrent writes from two processes to the same `FILE*` can interleave at the `stdio` buffer level. In practice this is benign because the child only logs during `curl_easy_perform()` (when the parent is waiting on `fdwait`), and the parent only logs before/after. But `fflush()` in one process does not flush the other process's `stdio` buffer. Acceptable for now; a future improvement could use `write()` directly or separate log files.
 
-### Potential issue: Zombie processes on unclean shutdown
+### Architecture note: Zombie processes
 
-If `stream_client_wait_done()` is never called (e.g. the test program's `_exit(0)` in the SIGINT handler on second press), any running child process becomes a zombie. Currently `llm_runtime_send()` always calls `wait_done`, and `stream_client_free()` also calls `waitpid()`. But edge cases (e.g. double-SIGINT before the cleanup path runs) could leak zombies. A `SIGCHLD` handler or `waitpid(-1, &status, WNOHANG)` loop on shutdown would be more robust.
+When `stream_client_free()` or `stream_client_wait_done()` is called, `waitpid()` reaps the child. If the parent process exits (e.g. `_exit(0)` on second SIGINT), any unreaped child is automatically reparented to init (PID 1), which reaps it. So zombies are not a persistent problem — they only exist for the brief window between child exit and parent exit, and the kernel cleans up. No code change needed.
 
 ### Pre-existing issue (inherited from pthread version): Pipe buffer drain race
 
 In the original pthread code, `c->curl_running = 0` was set by the curl thread **before** closing the pipe. The main loop condition `while (c->running && (c->curl_running || first_attempt))` would exit as soon as `curl_running` went to 0, even if data was still sitting in the kernel pipe buffer. This was masked because the write callback's `write()` blocked on pipe-full, providing backpressure that forced the main thread to keep reading. The new mfork code avoids this entirely by relying purely on pipe EOF (child closes write end → parent reads until `read()` returns 0).
 
-### Pre-existing quirk: `[DONE]` marker extraction path
+### Pre-existing quirk: `[DONE]` marker extraction path (improved)
 
-The `[DONE]` marker is only recognized after cJSON fails to parse it as JSON. The extraction path is:
-1. Try cJSON → fails
-2. Try event-boundary JSON extraction → fails
-3. Consume `"data: "` prefix → return 0
-4. Next call: `strncmp(buf->data, "[DONE]", 6)` matches → extract
-
-This is fragile: any change to cJSON's behavior on `[DONE]` (e.g. treating it as a valid but empty array) would break the extraction. A dedicated check for `[DONE]` before attempting JSON parsing would be more robust.
+The `[DONE]` marker is recognized via a top-level substring check (`strncmp` for `[DONE]` and `data: [DONE]`). The multi-line JSON fallback path previously consumed the `"data: "` prefix and returned 0 when it encountered non-JSON content — which would waste a round-trip if the consumed prefix revealed a `[DONE]` underneath. **Improved**: the fallback path now immediately re-checks for `[DONE]` after consuming the prefix, avoiding the extra cycle. A future robustness improvement would be to check for `[DONE]` before attempting any JSON parsing at all (right after the leading-whitespace skip).
 
 ### Architecture note: curl handle cleanup across fork
 
