@@ -28,10 +28,13 @@
 /* Maximum file size we'll read (100 KB) */
 #define TOOL_READ_MAX_BYTES (100 * 1024)
 
-/* Prompt user for y/N approval. Returns 1 if approved, 0 otherwise. */
-static int ask_approval(const char *prompt) {
+/* Prompt user for y/N approval.
+ * Returns 1 if approved, 0 if denied, -1 if cancelled (Ctrl+D). */
+static int ask_approval(llm_runtime_t *rt, const char *prompt) {
+    (void)rt;
     char *reply = ic_readline(prompt);
-    if (!reply) return 0;
+
+    if (!reply) return -1;  /* Ctrl+D on empty line → cancel turn */
 
     size_t rlen = strlen(reply);
     while (rlen > 0 && (reply[rlen-1] == '\n' || reply[rlen-1] == '\r'))
@@ -111,7 +114,14 @@ cJSON *tool_shell(llm_runtime_t *rt, const cJSON *args) {
 
     /* Ask for user approval before executing */
     printf("\n  [tool] proposed command: %s\n", cmd);
-    if (!ask_approval("[yellow][b]Run this command? y/N[/] ")) {
+    int approved = ask_approval(rt,
+        "[yellow][b]Run this command? y/N[/] ");
+    if (approved < 0) {
+        llm_runtime_cancel(rt);
+        cJSON_AddStringToObject(result, "text", "cancelled");
+        return result;
+    }
+    if (approved == 0) {
         cJSON_AddStringToObject(result, "text",
             "user denied shell execution");
         return result;
@@ -159,6 +169,9 @@ cJSON *tool_shell(llm_runtime_t *rt, const cJSON *args) {
  * Read Tool
  * ============================================================================ */
 
+static char *expand_tilde(const char *path);
+static char *resolve_abs_path(const char *path);
+
 cJSON *tool_read(llm_runtime_t *rt, const cJSON *args) {
     (void)rt;
 
@@ -195,7 +208,10 @@ cJSON *tool_read(llm_runtime_t *rt, const cJSON *args) {
 
     printf("\n  [tool] reading: %s (offset=%d, limit=%d)\n", path, offset, limit);
 
-    FILE *f = fopen(path, "rb");
+    char *resolved = resolve_abs_path(path);
+    FILE *f = fopen(resolved, "rb");
+    free(resolved);
+
     if (!f) {
         char errbuf[256];
         snprintf(errbuf, sizeof(errbuf),
@@ -318,25 +334,50 @@ cJSON *tool_read(llm_runtime_t *rt, const cJSON *args) {
  * Write Tool
  * ============================================================================ */
 
-/* Resolve path to absolute. For existing files uses realpath();
- * for new paths prepends CWD. Caller must free the result. */
-static char *resolve_abs_path(const char *path) {
-    /* Try realpath first (works if file exists) */
-    char *resolved = realpath(path, NULL);
-    if (resolved) return resolved;
+/* Expand leading ~ to $HOME. Caller must free the result. */
+static char *expand_tilde(const char *path) {
+    if (!path || path[0] != '~') return strdup(path);
 
-    /* If file doesn't exist, prepend CWD */
-    if (path[0] == '/') {
-        return strdup(path);
+    const char *home = getenv("HOME");
+    if (!home) home = "/tmp";
+
+    size_t len = strlen(home) + strlen(path);  /* path includes ~ */
+    char *result = malloc(len);
+    if (!result) return strdup(path);
+    snprintf(result, len, "%s%s", home, path + 1);
+    return result;
+}
+
+/* Resolve path to absolute. Expands ~, uses realpath() for existing files,
+ * prepends CWD for new paths. Caller must free the result. */
+static char *resolve_abs_path(const char *path) {
+    char *expanded = expand_tilde(path);
+
+    /* Try realpath first (works if file exists) */
+    char *resolved = realpath(expanded, NULL);
+    if (resolved) {
+        free(expanded);
+        return resolved;
     }
 
-    char cwd[4096];
-    if (!getcwd(cwd, sizeof(cwd))) return strdup(path);
+    /* If file doesn't exist, use the expanded path as-is if it's absolute */
+    if (expanded[0] == '/') {
+        return expanded;
+    }
 
-    size_t len = strlen(cwd) + 1 + strlen(path) + 1;
+    /* Relative path that doesn't exist yet: prepend CWD */
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof(cwd))) {
+        return expanded;
+    }
+
+    size_t len = strlen(cwd) + 1 + strlen(expanded) + 1;
     char *abs = malloc(len);
-    if (!abs) return strdup(path);
-    snprintf(abs, len, "%s/%s", cwd, path);
+    if (!abs) {
+        return expanded;
+    }
+    snprintf(abs, len, "%s/%s", cwd, expanded);
+    free(expanded);
     return abs;
 }
 
@@ -415,7 +456,15 @@ cJSON *tool_write(llm_runtime_t *rt, const cJSON *args) {
         printf("\n  ... [%zu more bytes]", content_len - preview_len);
     printf("\n");
 
-    if (!ask_approval("[yellow][b]Apply this file operation? y/N[/] ")) {
+    int approved = ask_approval(rt,
+        "[yellow][b]Apply this file operation? y/N[/] ");
+    if (approved < 0) {
+        llm_runtime_cancel(rt);
+        free(abs_path);
+        cJSON_AddStringToObject(result, "text", "cancelled");
+        return result;
+    }
+    if (approved == 0) {
         free(abs_path);
         cJSON_AddStringToObject(result, "text",
             "user denied file write");
@@ -592,7 +641,16 @@ cJSON *tool_edit(llm_runtime_t *rt, const cJSON *args) {
     printf("\033[32m%s\033[0m\n", new_str);
     printf("  ---\n");
 
-    if (!ask_approval("[yellow][b]Apply this edit? y/N[/] ")) {
+    int approved = ask_approval(rt,
+        "[yellow][b]Apply this edit? y/N[/] ");
+    if (approved < 0) {
+        llm_runtime_cancel(rt);
+        free(buf);
+        free(abs_path);
+        cJSON_AddStringToObject(result, "text", "cancelled");
+        return result;
+    }
+    if (approved == 0) {
         free(buf);
         free(abs_path);
         cJSON_AddStringToObject(result, "text",

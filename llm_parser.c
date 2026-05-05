@@ -348,12 +348,13 @@ LlmParserStatus llm_parser_force_finish(LlmParser *p)
     /* Finalize accumulated content */
     if (p->assistant.content_buf && p->assistant.content_len > 0) {
         cJSON_AddStringToObject(msg, "content", p->assistant.content_buf);
+    } else if (p->tool_call_parser.any_active) {
+        /* Had partial tool calls (discarded), still need content field */
+        cJSON_AddNullToObject(msg, "content");
     } else {
-        /* Only add null if there's nothing else (no reasoning, no tool calls) */
-        if ((!p->assistant.reasoning_buf || p->assistant.reasoning_len == 0) &&
-            !p->tool_call_parser.any_active) {
-            cJSON_AddNullToObject(msg, "content");
-        }
+        /* No content and no tool calls (e.g. only reasoning): empty string
+         * satisfies the API requirement that content or tool_calls must be set. */
+        cJSON_AddStringToObject(msg, "content", "");
     }
 
     /* Finalize accumulated reasoning */

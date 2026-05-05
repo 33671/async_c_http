@@ -2,7 +2,7 @@
  * history_db.h
  *
  * SQLite-backed conversation history storage.
- * Database path: ~/.agent/history.sql
+ * Database path: ~/.cop/history.sql
  *
  * Usage:
  *   history_db_t *db;
@@ -36,7 +36,7 @@ typedef struct history_db history_db_t;
  * ============================================================================ */
 
 /*
- * Open (or create) the history database at ~/.agent/history.sql.
+ * Open (or create) the history database at ~/.cop/history.sql.
  * Creates parent directories and tables automatically.
  * Returns 0 on success, -1 on error.
  */
@@ -69,6 +69,12 @@ cJSON *history_db_list_sessions(history_db_t *db, const char *cwd);
  * Returns 0 on success, -1 on error.
  */
 int history_db_delete_session(history_db_t *db, int64_t session_id);
+
+/*
+ * Delete all sessions for a given working directory.
+ * Returns number of deleted sessions, -1 on error.
+ */
+int history_db_delete_sessions_by_cwd(history_db_t *db, const char *cwd);
 
 /* ============================================================================
  * Messages

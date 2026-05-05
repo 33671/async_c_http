@@ -88,7 +88,7 @@ int history_db_open(history_db_t **db_out) {
     history_db_t *db = calloc(1, sizeof(history_db_t));
     if (!db) return -1;
 
-    char *db_path = expand_path("~/.agent/history.sql");
+    char *db_path = expand_path("~/.cop/history.sql");
     if (!db_path) {
         free(db);
         return -1;
@@ -273,6 +273,26 @@ int history_db_delete_session(history_db_t *db, int64_t session_id) {
     sqlite3_finalize(stmt);
 
     return (rc == SQLITE_DONE) ? 0 : -1;
+}
+
+int history_db_delete_sessions_by_cwd(history_db_t *db, const char *cwd) {
+    if (!db || !db->conn) return -1;
+
+    sqlite3_stmt *stmt = NULL;
+    const char *sql = "DELETE FROM sessions WHERE cwd = ?";
+
+    if (sqlite3_prepare_v2(db->conn, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "[history_db] delete_sessions_cwd prepare: %s\n",
+                sqlite3_errmsg(db->conn));
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, cwd ? cwd : "", -1, SQLITE_STATIC);
+    int rc = sqlite3_step(stmt);
+    int deleted = (rc == SQLITE_DONE) ? sqlite3_changes(db->conn) : -1;
+    sqlite3_finalize(stmt);
+
+    return deleted;
 }
 
 /* ============================================================================

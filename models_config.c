@@ -1,7 +1,7 @@
 /*
  * models_config.c
  *
- * Parse ~/.agent/models.json into model_entry_t array.
+ * Parse ~/.cop/models.json into model_entry_t array.
  */
 
 #include "models_config.h"
@@ -52,14 +52,14 @@ static char *read_file(const char *path) {
  * ============================================================================ */
 
 model_entry_t **models_config_load(void) {
-    char *path = expand_path("~/.agent/models.json");
+    char *path = expand_path("~/.cop/models.json");
     if (!path) return NULL;
 
     char *json_str = read_file(path);
     free(path);
 
     if (!json_str) {
-        fprintf(stderr, "[models] cannot read ~/.agent/models.json\n");
+        fprintf(stderr, "[models] cannot read ~/.cop/models.json\n");
         return NULL;
     }
 
@@ -67,7 +67,7 @@ model_entry_t **models_config_load(void) {
     free(json_str);
 
     if (!root) {
-        fprintf(stderr, "[models] invalid JSON in ~/.agent/models.json\n");
+        fprintf(stderr, "[models] invalid JSON in ~/.cop/models.json\n");
         return NULL;
     }
 

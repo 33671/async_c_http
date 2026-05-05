@@ -197,7 +197,27 @@ target_include_directories(tool_functions PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/isocline/include
 )
 
-# LLM Runtime test program
+# cop — main agent executable
+add_executable(cop cop.c cop_ui.c)
+target_compile_options(cop PRIVATE
+    -fno-stack-clash-protection
+)
+target_link_libraries(cop
+    models_config
+    history_db
+    tool_functions
+    isocline
+    llm_runtime
+    openai_stream_client_lib
+    openai_sse_parser
+    llm_parser
+    sqlite3
+    cjson
+    mill
+    CURL::libcurl
+)
+
+# LLM Runtime test program (legacy)
 add_executable(llm_runtime_test llm_runtime_test.c utils.c)
 target_compile_options(llm_runtime_test PRIVATE
     -fno-stack-clash-protection
