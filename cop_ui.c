@@ -205,6 +205,19 @@ static void on_runtime_event(llm_runtime_t *rt,
                 printf("  total: %s",
                        fmt_tokens(t->valueint, to, sizeof(to)));
             }
+            /* Context window usage */
+            {
+                const char *model_id = llm_runtime_get_model(rt);
+                const model_entry_t *entry = models_config_find(g_models, model_id);
+                if (entry && entry->context_window > 0) {
+                    int ctx = entry->context_window;
+                    int used = t && cJSON_IsNumber(t) ? t->valueint : 0;
+                    double pct = (ctx > 0) ? (used * 100.0 / ctx) : 0;
+                    char ctxbuf[16];
+                    printf("  \033[90mctx: %.1f%%/%s\033[0m",
+                           pct, fmt_tokens(ctx, ctxbuf, sizeof(ctxbuf)));
+                }
+            }
             printf("\033[0m\n");
         }
         break;
@@ -298,8 +311,9 @@ static void cmd_load(llm_runtime_t *rt, const char *arg) {
 
     /* Print last 50 messages */
     int print_start = (n > 50) ? n - 50 : 0;
-    printf("\n  ── History (messages %d-%d of %d) ──\n",
+    printf("\n  \033[90m── History (messages %d–%d of %d) ──\033[0m\n",
            print_start + 1, n, n);
+
     for (int i = print_start; i < n; i++) {
         cJSON *msg    = cJSON_GetArrayItem(msgs, i);
         cJSON *r      = cJSON_GetObjectItem(msg, "role");
@@ -311,64 +325,95 @@ static void cmd_load(llm_runtime_t *rt, const char *arg) {
         const char *role    = (r && cJSON_IsString(r)) ? r->valuestring : "?";
         const char *raw     = (c && cJSON_IsString(c)) ? c->valuestring : NULL;
 
-        /* Truncate long content (first 200 chars / first 3 lines) */
-        char content[256];
-        if (raw) {
-            size_t rlen = strlen(raw);
-            int lines = 0;
-            size_t e = 0;
-            for (size_t j = 0; j < rlen && j < 200 && lines < 3; j++) {
-                content[e++] = raw[j];
-                if (raw[j] == '\n') lines++;
-            }
-            if (e < rlen) { content[e++] = '.'; content[e++] = '.'; content[e++] = '.'; }
-            content[e] = '\0';
-        } else {
-            content[0] = '\0';
-        }
-
         if (strcmp(role, "user") == 0) {
-            printf("  \033[1;32m[%d] user:\033[0m %s\n", i + 1, content);
-        } else if (strcmp(role, "assistant") == 0) {
-            printf("  \033[1;34m[%d] assistant:\033[0m %s\n", i + 1,
-                   raw ? content : "(tool_calls only)");
-            if (rc && cJSON_IsString(rc) && rc->valuestring[0]) {
-                /* Truncate reasoning too */
-                const char *rraw = rc->valuestring;
-                char rbuf[256];
-                size_t rrlen = strlen(rraw);
-                int rlines = 0;
-                size_t re = 0;
-                for (size_t j = 0; j < rrlen && j < 200 && rlines < 3; j++) {
-                    rbuf[re++] = rraw[j];
-                    if (rraw[j] == '\n') rlines++;
+            /* User: keep truncation (200 chars / 3 lines) */
+            if (raw && raw[0]) {
+                size_t rlen = strlen(raw);
+                int lines = 0;
+                size_t e = 0;
+                for (size_t j = 0; j < rlen && j < 200 && lines < 3; j++) {
+                    if (raw[j] == '\n') lines++;
+                    e++;
                 }
-                if (re < rrlen) { rbuf[re++] = '.'; rbuf[re++] = '.'; rbuf[re++] = '.'; }
-                rbuf[re] = '\0';
-                printf("  \033[2;3m       reasoning: %s\033[0m\n", rbuf);
+                int truncated = (e < rlen);
+                printf("  \033[1;32m[%d] user:\033[0m %.*s%s\n",
+                       i + 1, (int)e, raw, truncated ? "..." : "");
+            } else {
+                printf("  \033[1;32m[%d] user:\033[0m\n", i + 1);
             }
+        } else if (strcmp(role, "assistant") == 0) {
+            /* Reasoning: light gray, NO truncation, no label */
+            if (rc && cJSON_IsString(rc) && rc->valuestring[0]) {
+                printf("\033[90m%s\033[0m\n", rc->valuestring);
+            }
+            /* Content: bold blue, NO truncation, no label */
+            if (raw && raw[0]) {
+                printf("\033[1;34m%s\033[0m\n", raw);
+            }
+            /* Tool calls: same format as runtime, complete display */
             if (tc && cJSON_IsArray(tc) && cJSON_GetArraySize(tc) > 0) {
-                printf("  \033[33m       tool_calls:\033[0m ");
                 int tcn = cJSON_GetArraySize(tc);
+                printf("\n");
                 for (int j = 0; j < tcn; j++) {
                     cJSON *t  = cJSON_GetArrayItem(tc, j);
                     cJSON *fn = cJSON_GetObjectItem(t, "function");
                     cJSON *nm = fn ? cJSON_GetObjectItem(fn, "name") : NULL;
-                    printf("%s%s", j > 0 ? ", " : "",
-                           (nm && cJSON_IsString(nm)) ? nm->valuestring : "?");
+                    cJSON *ar = fn ? cJSON_GetObjectItem(fn, "arguments") : NULL;
+                    const char *nstr = (nm && cJSON_IsString(nm)) ? nm->valuestring : "?";
+                    const char *astr = (ar && cJSON_IsString(ar)) ? ar->valuestring : "";
+                    printf("  \033[33mtool:\033[0m \033[1;33m%s\033[0m", nstr);
+                    if (astr && astr[0]) {
+                        size_t alen = strlen(astr);
+                        if (alen > 80) {
+                            printf(" \033[90m%.80s...\033[0m", astr);
+                        } else {
+                            printf(" \033[90m%s\033[0m", astr);
+                        }
+                    }
+                    printf("\n");
                 }
-                printf("\n");
             }
         } else if (strcmp(role, "tool") == 0) {
-            const char *tid = (tc_id && cJSON_IsString(tc_id))
-                              ? tc_id->valuestring : "?";
-            printf("  \033[1;33m[%d] tool(%s):\033[0m %s\n",
-                   i + 1, tid, content);
+            /* Tool result: same format as runtime, truncate to 3 lines */
+            if (raw && raw[0]) {
+                const char *first_nl = strchr(raw, '\n');
+                if (first_nl && *(first_nl + 1)) {
+                    int first_len = (int)(first_nl - raw);
+                    printf("  \033[32m->\033[0m \033[90m%.*s\033[0m\n",
+                           first_len, raw);
+                    const char *rest = first_nl + 1;
+                    int line_count = 0;
+                    while (*rest && line_count < 2) {
+                        const char *next = strchr(rest, '\n');
+                        if (next) {
+                            printf("     \033[90m%.*s\033[0m\n",
+                                   (int)(next - rest), rest);
+                            rest = next + 1;
+                        } else {
+                            printf("     \033[90m%s\033[0m\n", rest);
+                            break;
+                        }
+                        line_count++;
+                    }
+                    if (*rest) {
+                        printf("     \033[90m...\033[0m\n");
+                    }
+                } else {
+                    printf("  \033[32m->\033[0m \033[90m%s\033[0m\n", raw);
+                }
+            } else {
+                printf("  \033[32m->\033[0m\n");
+            }
         } else {
-            printf("  \033[90m[%d] %s:\033[0m %s\n", i + 1, role, content);
+            /* Unknown role — truncated */
+            int show = raw ? (int)strlen(raw) : 0;
+            if (show > 120) show = 120;
+            printf("  \033[90m[%d] %s:\033[0m %.*s%s\n",
+                   i + 1, role, show, raw ? raw : "",
+                   raw && (int)strlen(raw) > 120 ? "..." : "");
         }
     }
-    printf("  ── end of history ──\n\n");
+    printf("  \033[90m── end of history ──\033[0m\n\n");
 
     for (int i = 0; i < n; i++) {
         llm_runtime_add_message(rt, cJSON_GetArrayItem(msgs, i));

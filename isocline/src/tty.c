@@ -194,8 +194,8 @@ static code_t modify_code( code_t code ) {
     key = '_';
     code = WITH_CTRL(key_char('_'));
   }
-  // treat ctrl/shift + enter always as KEY_LINEFEED for portability
-  else if (key == KEY_ENTER && (mods == KEY_MOD_SHIFT || mods == KEY_MOD_ALT || mods == KEY_MOD_CTRL)) {
+  // treat ctrl/shift + enter always as KEY_LINEFEED for portability (Alt+Enter stays as WITH_ALT(KEY_ENTER))
+  else if (key == KEY_ENTER && (mods == KEY_MOD_SHIFT || mods == KEY_MOD_CTRL)) {
     code = KEY_LINEFEED;
   }
   // treat ctrl+tab always as shift+tab for portability
