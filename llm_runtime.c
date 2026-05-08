@@ -265,17 +265,36 @@ static int execute_tool_calls(llm_runtime_t *rt,
         }
 
         /* Parse arguments and execute */
-        cJSON *args   = cJSON_Parse(args_str);
+        cJSON *args = cJSON_Parse(args_str);
         cJSON *result;
-        if (tool_fn) {
-            result = tool_fn(rt, args ? args : cJSON_CreateObject());
+        if (args == NULL) {
+            /* JSON parse failed — report error, don't call tool */
+            const char *err_ptr = cJSON_GetErrorPtr();
+            fprintf(stderr,
+                    "\n  \033[1;31m[error] tool '%s' — invalid JSON arguments\033[0m\n"
+                    "  \033[90m%s\033[0m\n"
+                    "  \033[90mparse error at: %s\033[0m\n\n",
+                    name ? name : "?",
+                    args_str ? args_str : "(null)",
+                    err_ptr ? err_ptr : "unknown");
+            result = cJSON_CreateObject();
+            cJSON_AddStringToObject(result, "type", "text");
+            char errbuf[512];
+            snprintf(errbuf, sizeof(errbuf),
+                     "error: tool call '%s' has invalid JSON arguments; "
+                     "parse error near: %.100s",
+                     name ? name : "?",
+                     err_ptr ? err_ptr : "unknown");
+            cJSON_AddStringToObject(result, "text", errbuf);
+        } else if (tool_fn) {
+            result = tool_fn(rt, args);
         } else {
             result = cJSON_CreateObject();
             cJSON_AddStringToObject(result, "type", "text");
             cJSON_AddStringToObject(result, "text",
                 "Error: unknown tool or tool not registered");
         }
-        cJSON_Delete(args);
+        if (args) cJSON_Delete(args);
 
         /*
          * Tool functions return one of two valid JSON formats:
