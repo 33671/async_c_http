@@ -185,8 +185,12 @@ target_include_directories(models_config PUBLIC
 )
 
 # Tool functions (example tool implementations)
+add_library(diff STATIC diff.c)
+target_include_directories(diff PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_library(tool_functions STATIC tool_functions.c)
 target_link_libraries(tool_functions
+    diff
     isocline
     llm_runtime
     cjson
