@@ -35,7 +35,7 @@ const char* role_to_str(Role role);
 typedef struct {
     /* Basic metadata */
     char *id;                /* response id (may be NULL) */
-    char *model;             /* model name (may be NULL) */
+    // char *model;             /* model name (may be NULL) */
     long created;            /* timestamp (0 if missing) */
 
     /* Delta content (all nullable) */

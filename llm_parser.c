@@ -238,7 +238,7 @@ LlmParserStatus llm_parser_feed_chunk(LlmParser *p, const StreamChunk *chunk)
         p->assistant.msg = cJSON_CreateObject();
         cJSON_AddStringToObject(p->assistant.msg, "role", "assistant");
         if (chunk->id)    cJSON_AddStringToObject(p->assistant.msg, "id", chunk->id);
-        if (chunk->model) cJSON_AddStringToObject(p->assistant.msg, "model", chunk->model);
+        // if (chunk->model) cJSON_AddStringToObject(p->assistant.msg, "model", chunk->model);
         /* Fall through to process other fields in this same chunk */
     }
 

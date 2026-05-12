@@ -121,7 +121,7 @@ static int safe_get_int(cJSON *obj, const char *key, int default_val) {
 void stream_chunk_cleanup(StreamChunk *chunk) {
     if (!chunk) return;
     free(chunk->id);
-    free(chunk->model);
+    // free(chunk->model);
     free(chunk->content);
     free(chunk->reasoning_content);
     if (chunk->tool_calls) cJSON_Delete(chunk->tool_calls);
@@ -149,7 +149,7 @@ int stream_chunk_copy(StreamChunk *dst, const StreamChunk *src) {
     }
     
     if (src->id) dst->id = strdup(src->id);
-    if (src->model) dst->model = strdup(src->model);
+    // if (src->model) dst->model = strdup(src->model);
     if (src->role) dst->role = src->role;
     if (src->content) dst->content = strdup(src->content);
     if (src->reasoning_content) dst->reasoning_content = strdup(src->reasoning_content);
@@ -186,7 +186,7 @@ int stream_chunk_parse(const char *json_str, StreamChunk *chunk) {
     
     /* Extract top-level fields */
     chunk->id = safe_get_string(root, "id");
-    chunk->model = safe_get_string(root, "model");
+    // chunk->model = safe_get_string(root, "model");
     chunk->created = safe_get_int(root, "created", 0);
     
     /* Navigate to choices[0].delta */
