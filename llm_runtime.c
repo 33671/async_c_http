@@ -638,7 +638,8 @@ coroutine int llm_runtime_send(llm_runtime_t *rt,
 
     /* ---- Step 9: Notify completion ---- */
     if (loop_count >= LLM_RUNTIME_MAX_TOOL_LOOPS) {
-        fprintf(stderr, "\n[debug] tool loop: MAX ITERATIONS (%d) reached, forcing turn end\n", LLM_RUNTIME_MAX_TOOL_LOOPS);
+        printf("\n\033[1;33m[tool loop limit] %d iterations reached, ending turn. "
+               "Continue in next message.\033[0m\n", LLM_RUNTIME_MAX_TOOL_LOOPS);
     }
     fprintf(stderr, "\n[debug] tool loop: turn complete after %d iteration(s)\n", loop_count);
     if (on_chunk) {
